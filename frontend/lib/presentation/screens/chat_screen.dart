@@ -1,156 +1,384 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import '../../logic/websocket_provider.dart';
+import 'package:onka/presentation/widgets/big_screen_chat_widget.dart';
+import 'package:onka/presentation/widgets/control_bar_widget.dart';
+import 'package:onka/presentation/widgets/floating_chat_widget.dart';
+import 'package:onka/presentation/widgets/video_container.dart';
 import '../../core/webrtc_service.dart';
+import '../../logic/websocket_provider.dart';
 import '../theme.dart';
 
-/// Modern text chat widget with improved styling
-class _TextChatWidget extends StatelessWidget {
-  final List<Map<String, String>> messages;
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final VoidCallback onSend;
 
-  const _TextChatWidget({
-    required this.messages,
-    required this.controller,
-    required this.focusNode,
-    required this.onSend,
-  });
+final webrtcServiceProvider = Provider.autoDispose<WebRTCService>((ref) {
+  final service = WebRTCService();
+  ref.onDispose(() => service.close());
+  return service;
+});
+
+
+class ChatScreen extends ConsumerStatefulWidget {
+  final String localUserId;
+
+  const ChatScreen({super.key, required this.localUserId});
+
+  @override
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  // UI State
+  bool _isMuted = false;
+  bool _isCameraOn = true;
+  bool _isConnecting = true;
+  bool _isChatExpanded = false; // Used only for mobile floating chat
+  String? _peerId;
+
+  Offset _pipOffset = Offset.zero;
+  final GlobalKey _pipKey = GlobalKey();
+
+  // Chat State
+  final List<Map<String, String>> _messages = [];
+  final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Set initial PIP position after the first frame is rendered
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final screenWidth = MediaQuery.of(context).size.width;
+      final safeArea = MediaQuery.of(context).padding;
+      setState(() {
+        // Default position: top right corner
+        _pipOffset = Offset(screenWidth - 120 - 16, safeArea.top + 16);
+      });
+      _initConnection();
+    });
+
+    // Listen to focus changes to expand/collapse the chat on mobile
+    _textFocusNode.addListener(() {
+      if (_textFocusNode.hasFocus != _isChatExpanded) {
+        setState(() => _isChatExpanded = _textFocusNode.hasFocus);
+      }
+    });
+  }
+
+  // --- Core Logic & Signaling between peer and signaling server
+
+  Future<void> _initConnection() async {
+    setState(() => _isConnecting = true);
+    final webrtc = ref.read(webrtcServiceProvider);
+
+    try {
+      await webrtc.initRenderers();
+      await webrtc.getUserMedia();
+      if (mounted) setState(() {});
+      ref.read(websocketProvider.notifier).connect(widget.localUserId);
+    } catch (e) {
+      debugPrint('❌ Error in _initConnection: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to initialize camera/mic: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _findNewPartner() async {
+    ref.read(websocketProvider.notifier).disconnect();
+    ref.invalidate(webrtcServiceProvider);
+
+    setState(() {
+      _messages.clear();
+      _peerId = null;
+      _isConnecting = true;
+    });
+
+    await Future.delayed(const Duration(milliseconds: 200));
+    await _initConnection();
+  }
+
+  void _toggleCamera() {
+    final webrtc = ref.read(webrtcServiceProvider);
+    if (webrtc.localStream != null) {
+      final newCameraState = !_isCameraOn;
+      webrtc.localStream!.getVideoTracks().forEach((track) {
+        track.enabled = newCameraState;
+      });
+      setState(() => _isCameraOn = newCameraState);
+    }
+  }
+
+  void _toggleMute() {
+    final webrtc = ref.read(webrtcServiceProvider);
+    if (webrtc.localStream != null) {
+      final newMuteState = !_isMuted;
+      // Note: For audio, enabled=true means unmuted.
+      webrtc.localStream!.getAudioTracks().forEach((track) {
+        track.enabled = !newMuteState;
+      });
+      setState(() => _isMuted = newMuteState);
+    }
+  }
+
+  void _sendMessage() {
+    if (_textController.text.trim().isEmpty) return;
+    final messageText = _textController.text.trim();
+    setState(() {
+      _messages.insert(0, {'sender': 'me', 'text': messageText});
+    });
+    _textController.clear();
+
+    if (_peerId != null) {
+      ref.read(websocketProvider.notifier).send({
+        'type': 'chat_message',
+        'message': messageText,
+        'to': _peerId,
+      });
+    }
+    _textFocusNode.requestFocus();
+  }
+
+  void _handleWebSocketState(WebSocketState state) {
+    if (state.peerId != null && state.peerId != _peerId) {
+      setState(() {
+        _peerId = state.peerId;
+        _isConnecting = false;
+      });
+      _initAndSendOffer();
+    } else if (state.peerId == null && _peerId != null) {
+      setState(() {
+        _peerId = null;
+        _isConnecting = true;
+        _messages.clear();
+      });
+    }
+
+    final data = state.data;
+    if (data != null) {
+      switch (data['type']) {
+        case 'offer':
+          _initAndSendAnswer(data);
+          break;
+        case 'answer':
+          _handleAnswer(data);
+          break;
+        case 'candidate':
+          _handleCandidate(data);
+          break;
+        case 'chat_message':
+          _handleChatMessage(data);
+          break;
+      }
+    }
+  }
+
+  Future<void> _initPeerConnection() async {
+    final webrtc = ref.read(webrtcServiceProvider);
+    final wsNotifier = ref.read(websocketProvider.notifier);
+    await webrtc.initPeerConnection(
+      configuration: {
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+        ],
+      },
+      onIceCandidate: (candidate) {
+        wsNotifier.send({
+          'type': 'candidate',
+          'candidate': candidate.toMap(),
+          'to': _peerId,
+        });
+      },
+      onTrack: (stream) {
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  Future<void> _initAndSendOffer() async {
+    try {
+      await _initPeerConnection();
+      final webrtc = ref.read(webrtcServiceProvider);
+      final offer = await webrtc.createOffer();
+      await webrtc.setLocalDescription(offer);
+      ref.read(websocketProvider.notifier).send({
+        'type': 'offer',
+        'sdp': offer.sdp,
+        'to': _peerId,
+      });
+    } catch (e) {
+      debugPrint('❌ Error creating offer: $e');
+    }
+  }
+
+  Future<void> _initAndSendAnswer(Map<String, dynamic> offerMessage) async {
+    try {
+      await _initPeerConnection();
+      final webrtc = ref.read(webrtcServiceProvider);
+      await webrtc.setRemoteDescription(
+        RTCSessionDescription(offerMessage['sdp'], offerMessage['type']),
+      );
+      final answer = await webrtc.createAnswer();
+      await webrtc.setLocalDescription(answer);
+      ref.read(websocketProvider.notifier).send({
+        'type': 'answer',
+        'sdp': answer.sdp,
+        'to': _peerId,
+      });
+    } catch (e) {
+      debugPrint('❌ Error handling offer and creating answer: $e');
+    }
+  }
+
+  Future<void> _handleAnswer(Map<String, dynamic> message) async {
+    final webrtc = ref.read(webrtcServiceProvider);
+    try {
+      await webrtc.setRemoteDescription(
+        RTCSessionDescription(message['sdp'], message['type']),
+      );
+    } catch (e) {
+      debugPrint('❌ Error handling answer: $e');
+    }
+  }
+
+  Future<void> _handleCandidate(Map<String, dynamic> message) async {
+    final webrtc = ref.read(webrtcServiceProvider);
+    try {
+      await webrtc.addIceCandidate(
+        RTCIceCandidate(
+          message['candidate']['candidate'],
+          message['candidate']['sdpMid'],
+          message['candidate']['sdpMLineIndex'],
+        ),
+      );
+    } catch (e) {
+      debugPrint('❌ Error adding ICE candidate: $e');
+    }
+  }
+
+  void _handleChatMessage(Map<String, dynamic> message) {
+    setState(() {
+      _messages.insert(0, {'sender': 'peer', 'text': message['message']});
+    });
+  }
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _textFocusNode.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.surfaceDark,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppTheme.borderColor, width: 1),
+    ref.listen<WebSocketState>(
+      websocketProvider,
+      (_, next) => _handleWebSocketState(next),
+    );
+
+    return PopScope(
+      canPop: !_isChatExpanded, // You can only pop if the chat is NOT expanded
+      onPopInvokedWithResult: (bool didPop, k) {
+        // This runs *after* the pop attempt.
+        if (didPop) return; // If it popped, we're done.
+        _textFocusNode.unfocus(); // If it didn't pop, collapse the chat.
+      },
+      child: Scaffold(
+        backgroundColor: AppTheme.backgroundDark,
+        resizeToAvoidBottomInset: false,
+
+        // Use LayoutBuilder to choose the UI based on screen width
+        body: LayoutBuilder(
+          builder: (context, constraints) {
+            // Define a breakpoint for switching between layouts
+            const double desktopBreakpoint = 700.0;
+            final bool isDesktop = constraints.maxWidth > desktopBreakpoint;
+
+            if (isDesktop) {
+              return _buildDesktopLayout();
+            } else {
+              return _buildMobileLayout();
+            }
+          },
+        ),
       ),
-      child: Column(
+    );
+  }
+
+  /// Builds the UI for wide screens (Desktop).
+  Widget _buildDesktopLayout() {
+    final webrtc = ref.watch(webrtcServiceProvider);
+    final screenWidth = MediaQuery.of(context).size.width;
+    return SafeArea(
+      child: Row(
         children: [
-          // Messages area
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              child: messages.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.chat_bubble_outline,
-                            size: 48,
-                            color: AppTheme.textMuted,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Start a conversation',
-                            style: TextStyle(
-                              color: AppTheme.textMuted,
-                              fontSize: 16,
-                            ),
-                          ),
-                        ],
+          // Video section on the left
+          SizedBox(
+            width: screenWidth * 0.4, // Take up 40% of the screen width
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: VideoContainer(
+                      label: 'Remote Video',
+                      borderColor: AppTheme.errorColor,
+                      isLoading: _isConnecting,
+                      loadingText: 'Searching...',
+                      child: RTCVideoView(
+                        webrtc.remoteRenderer,
+                        objectFit: RTCVideoViewObjectFit
+                            .RTCVideoViewObjectFitContain, // Fit inside container
                       ),
-                    )
-                  : ListView.builder(
-                      reverse: true,
-                      itemCount: messages.length,
-                      itemBuilder: (context, index) {
-                        final message = messages[messages.length - 1 - index];
-                        final isMe = message['sender'] == 'me';
-
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: Align(
-                            alignment: isMe
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-                            child: Container(
-                              constraints: BoxConstraints(
-                                maxWidth:
-                                    MediaQuery.of(context).size.width * 0.7,
-                              ),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 10,
-                              ),
-                              decoration: BoxDecoration(
-                                color: isMe
-                                    ? AppTheme.primaryColor
-                                    : AppTheme.cardDark,
-                                borderRadius: BorderRadius.circular(20)
-                                    .copyWith(
-                                      bottomLeft: isMe
-                                          ? const Radius.circular(20)
-                                          : const Radius.circular(4),
-                                      bottomRight: isMe
-                                          ? const Radius.circular(4)
-                                          : const Radius.circular(20),
-                                    ),
-                              ),
-                              child: Text(
-                                message['text'] ?? '',
-                                style: const TextStyle(
-                                  color: AppTheme.textPrimary,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
                     ),
-            ),
-          ),
-
-          // Input area
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppTheme.cardDark,
-              borderRadius: const BorderRadius.only(
-                bottomLeft: Radius.circular(16),
-                bottomRight: Radius.circular(16),
+                  ),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: VideoContainer(
+                      label: 'Local Video',
+                      borderColor: AppTheme.successColor,
+                      child: webrtc.isVideoReady
+                          ? RTCVideoView(
+                              webrtc.localRenderer,
+                              mirror: true,
+                              objectFit: RTCVideoViewObjectFit
+                                  .RTCVideoViewObjectFitContain, // Fit inside container
+                            )
+                          : const _NoCameraView(),
+                    ),
+                  ),
+                ],
               ),
             ),
-            child: Row(
+          ),
+          // Chat and Controls section on the right
+          Expanded(
+            flex: 3,
+            child: Column(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    style: const TextStyle(color: AppTheme.textPrimary),
-                    decoration: const InputDecoration(
-                      hintText: 'Type a message...',
-                      hintStyle: TextStyle(color: AppTheme.textMuted),
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
+                  // This is the permanent chat area for desktop
+                  child: Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: BigScreenChatWidget(
+                      messages: _messages,
+                      controller: _textController,
+                      focusNode: _textFocusNode,
+                      onSend: _sendMessage,
                     ),
-                    onSubmitted: (_) => onSend(),
-                    onTapOutside: (event) {
-                      // Don't unfocus when tapping outside
-                    },
-                    textInputAction: TextInputAction.send,
-                    keyboardType: TextInputType.text,
-                    maxLines: null,
-                    textCapitalization: TextCapitalization.sentences,
                   ),
                 ),
-                const SizedBox(width: 8),
-                Container(
-                  decoration: BoxDecoration(
-                    color: AppTheme.primaryColor,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.send, color: Colors.white, size: 20),
-                    onPressed: onSend,
-                    padding: const EdgeInsets.all(12),
+                // Controls are at the bottom of the chat column
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: ControlsWidget(
+                    isMuted: _isMuted,
+                    isCameraOn: _isCameraOn,
+                    onMuteToggle: _toggleMute,
+                    onCameraToggle: _toggleCamera,
+                    onNext: _findNewPartner,
                   ),
                 ),
               ],
@@ -160,488 +388,123 @@ class _TextChatWidget extends StatelessWidget {
       ),
     );
   }
-}
 
-/// Video container widget
-class _VideoContainer extends StatelessWidget {
-  final Widget child;
-  final String label;
-  final Color borderColor;
-  final bool isLoading;
-  final String? loadingText;
+  /// Builds the UI for narrow screens (Mobile).
+  Widget _buildMobileLayout() {
+    final webrtc = ref.watch(webrtcServiceProvider);
+    final screenHeight = MediaQuery.of(context).size.height;
 
-  const _VideoContainer({
-    required this.child,
-    required this.label,
-    required this.borderColor,
-    this.isLoading = false,
-    this.loadingText,
-  });
+    final screenSize = MediaQuery.of(context).size;
+    final safeArea = MediaQuery.of(context).padding;
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.cardDark,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: borderColor, width: 2),
-      ),
-      child: Stack(
-        children: [
-          ClipRRect(borderRadius: BorderRadius.circular(14), child: child),
-          if (isLoading)
-            Container(
-              decoration: BoxDecoration(
-                color: AppTheme.backgroundDark.withValues(alpha: 0.8),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const CircularProgressIndicator(
-                      color: AppTheme.primaryColor,
-                      strokeWidth: 3,
-                    ),
-                    if (loadingText != null) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        loadingText!,
-                        style: const TextStyle(
-                          color: AppTheme.textSecondary,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          Positioned(
-            bottom: 12,
-            left: 12,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: AppTheme.backgroundDark.withValues(alpha: 0.8),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final isKeyboardOpen = keyboardHeight > 0;
 
-/// Main chat screen with modern, responsive design
-class ChatScreen extends ConsumerStatefulWidget {
-  final String localUserId;
-  final String remoteUserId;
+    final collapsedChatHeight = 200.0;
+    final availableHeight =
+        screenSize.height - (keyboardHeight + safeArea.top + safeArea.bottom);
+    final expandedChatHeight = availableHeight - 120;
 
-  const ChatScreen({
-    super.key,
-    required this.localUserId,
-    required this.remoteUserId,
-  });
-
-  @override
-  ConsumerState<ChatScreen> createState() => _ChatScreenState();
-}
-
-class _ChatScreenState extends ConsumerState<ChatScreen> {
-  bool isMuted = false;
-  bool isCameraOn = true;
-  final List<Map<String, String>> messages = [];
-  final TextEditingController _controller = TextEditingController();
-  final FocusNode _focusNode = FocusNode();
-  late final WebRTCService _webrtc;
-  String? _peerId;
-  bool _connecting = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _webrtc = WebRTCService();
-    Future.microtask(() => _initConnection());
-  }
-
-  /// Initialize local video/audio and connect to WebSocket signaling server
-  Future<void> _initConnection() async {
-    try {
-      await _webrtc.initRenderers();
-
-      // Add a small delay to ensure renderers are ready
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      await _webrtc.getUserMedia();
-
-      // Force a rebuild after video initialization
-      if (mounted) {
-        setState(() {});
-      }
-
-      debugPrint('Video ready: ${_webrtc.isVideoReady}');
-      debugPrint('Local stream: ${_webrtc.localStream != null}');
-
-      final ws = ref.read(websocketProvider.notifier);
-      ws.connect(widget.localUserId);
-    } catch (e) {
-      debugPrint('Error in _initConnection: $e');
-      // Show error to user
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to initialize camera: $e')),
-        );
-      }
-    }
-  }
-
-  /// Reconnect to a new chat partner
-  Future<void> _reconnectToNewChat() async {
-    try {
-      // Show reconnecting state
-      setState(() {
-        _connecting = true;
-      });
-
-      // First, properly close the current WebRTC connection
-      _webrtc.close();
-
-      // Clear the current state
-      setState(() {
-        messages.clear();
-        _peerId = null;
-      });
-
-      // Wait a bit before creating new service
-      await Future.delayed(const Duration(milliseconds: 500));
-
-      // Create a new WebRTC service instance
-      _webrtc = WebRTCService();
-
-      // Reinitialize everything
-      await _initConnection();
-
-      debugPrint('Successfully reconnected to new chat');
-    } catch (e) {
-      debugPrint('Error reconnecting: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed to reconnect: $e')));
-      }
-    }
-  }
-
-  /// Toggle camera on/off by enabling/disabling video tracks
-  Future<void> _toggleCamera() async {
-    setState(() => isCameraOn = !isCameraOn);
-    if (_webrtc.localStream != null) {
-      for (var track in _webrtc.localStream!.getVideoTracks()) {
-        track.enabled = isCameraOn;
-      }
-    }
-  }
-
-  /// WebSocket state listener: handles peer connection and offer creation
-  void _wsListener(WebSocketState state) {
-    if (state.peerId != null && state.peerId != _peerId) {
-      setState(() {
-        _peerId = state.peerId;
-        _connecting = false;
-      });
-      // Create and send offer to peer
-      _createAndSendOffer();
-    } else if (state.peerId == null && _peerId != null) {
-      setState(() {
-        _peerId = null;
-        _connecting = true;
-      });
-    }
-  }
-
-  /// Create and send WebRTC offer to peer
-  Future<void> _createAndSendOffer() async {
-    try {
-      await _webrtc.initPeerConnection({
-        'iceServers': [
-          {'urls': 'stun:stun.l.google.com:19302'},
-        ],
-      });
-      final offer = await _webrtc.createOffer();
-      await _webrtc.setLocalDescription(offer);
-      ref.read(websocketProvider.notifier).send({
-        'type': 'offer',
-        'sdp': offer.sdp,
-        'to': _peerId,
-      });
-    } catch (e) {
-      debugPrint('Error creating offer: $e');
-    }
-  }
-
-  /// Send a text message
-  void _sendMessage() {
-    if (_controller.text.trim().isNotEmpty) {
-      final messageText = _controller.text.trim();
-      setState(() {
-        messages.add({'sender': 'me', 'text': messageText});
-      });
-      _controller.clear();
-
-      // Send message to peer via WebSocket
-      if (_peerId != null) {
-        ref.read(websocketProvider.notifier).send({
-          'type': 'chat_message',
-          'message': messageText,
-          'to': _peerId,
-        });
-      }
-
-      // Keep focus on the text field after sending
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _focusNode.requestFocus();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Listen to WebSocket state changes
-    ref.listen<WebSocketState>(websocketProvider, (previous, next) {
-      _wsListener(next);
-    });
-
-    return Scaffold(
-      backgroundColor: AppTheme.backgroundDark,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
+    return GestureDetector(
+      onTap: () {
+        if (_isChatExpanded) {
+          _textFocusNode.unfocus();
+          setState(() => _isChatExpanded = false);
+        }
+      },
+      child: GestureDetector(
+        onTap: () => _textFocusNode.unfocus(),
+        child: SafeArea(
+          bottom: false,
+          child: Stack(
             children: [
-              // Video area
-              Expanded(
-                flex: 2,
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    // Responsive layout: side-by-side on desktop, stacked on mobile
-                    final isDesktop = constraints.maxWidth > 800;
-
-                    if (isDesktop) {
-                      // Desktop layout: side by side
-                      return Row(
-                        children: [
-                          Expanded(
-                            child: _VideoContainer(
-                              label: 'Local Video',
-                              borderColor: AppTheme.successColor,
-                              child: _webrtc.isVideoReady
-                                  ? RTCVideoView(
-                                      _webrtc.localRenderer,
-                                      mirror: true,
-                                      objectFit: RTCVideoViewObjectFit
-                                          .RTCVideoViewObjectFitCover,
-                                    )
-                                  : Container(
-                                      color: AppTheme.cardDark,
-                                      child: const Center(
-                                        child: Column(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.center,
-                                          children: [
-                                            Icon(
-                                              Icons.videocam_off,
-                                              color: AppTheme.textMuted,
-                                              size: 48,
-                                            ),
-                                            SizedBox(height: 8),
-                                            Text(
-                                              'Camera not available',
-                                              style: TextStyle(
-                                                color: AppTheme.textMuted,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: _VideoContainer(
-                              label: 'Remote Video',
-                              borderColor: AppTheme.errorColor,
-                              isLoading: _connecting,
-                              loadingText: 'Connecting...',
-                              child: _connecting
-                                  ? Container(color: AppTheme.cardDark)
-                                  : RTCVideoView(
-                                      _webrtc.remoteRenderer,
-                                      objectFit: RTCVideoViewObjectFit
-                                          .RTCVideoViewObjectFitCover,
-                                    ),
-                            ),
-                          ),
-                        ],
+              // --- Video Area ---
+              // On mobile, we stack videos for a picture-in-picture effect
+              Positioned.fill(
+                bottom: screenHeight * .3,
+                child: VideoContainer(
+                  label: 'Remote Video',
+                  borderColor: AppTheme.errorColor,
+                  isLoading: _isConnecting,
+                  loadingText: 'Searching...',
+                  child: RTCVideoView(
+                    webrtc.remoteRenderer,
+                    objectFit: RTCVideoViewObjectFit
+                        .RTCVideoViewObjectFitContain, // Fit inside container
+                  ),
+                ),
+              ),
+              // Local video as a small overlay
+              Positioned(
+                left: _pipOffset.dx,
+                top: _pipOffset.dy,
+                child: GestureDetector(
+                  onPanUpdate: (details) {
+                    setState(() {
+                      // Get the size of the PIP widget
+                      final pipSize = _pipKey.currentContext!.size!;
+                      // Calculate new offset and clamp it to screen bounds
+                      double newDx = (_pipOffset.dx + details.delta.dx).clamp(
+                        0.0,
+                        screenSize.width - pipSize.width,
                       );
-                    } else {
-                      // Mobile layout: stacked
-                      return Column(
-                        children: [
-                          Expanded(
-                            child: _VideoContainer(
-                              label: 'Local Video',
-                              borderColor: AppTheme.successColor,
-                              child: _webrtc.isVideoReady
-                                  ? RTCVideoView(
-                                      _webrtc.localRenderer,
-                                      mirror: true,
-                                      objectFit: RTCVideoViewObjectFit
-                                          .RTCVideoViewObjectFitCover,
-                                    )
-                                  : Container(
-                                      color: AppTheme.cardDark,
-                                      child: const Center(
-                                        child: Column(
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.center,
-                                          children: [
-                                            Icon(
-                                              Icons.videocam_off,
-                                              color: AppTheme.textMuted,
-                                              size: 48,
-                                            ),
-                                            SizedBox(height: 8),
-                                            Text(
-                                              'Camera not available',
-                                              style: TextStyle(
-                                                color: AppTheme.textMuted,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          Expanded(
-                            child: _VideoContainer(
-                              label: 'Remote Video',
-                              borderColor: AppTheme.errorColor,
-                              isLoading: _connecting,
-                              loadingText: 'Connecting...',
-                              child: _connecting
-                                  ? Container(color: AppTheme.cardDark)
-                                  : RTCVideoView(
-                                      _webrtc.remoteRenderer,
-                                      objectFit: RTCVideoViewObjectFit
-                                          .RTCVideoViewObjectFitCover,
-                                    ),
-                            ),
-                          ),
-                        ],
+                      double newDy = (_pipOffset.dy + details.delta.dy).clamp(
+                        safeArea.top,
+                        screenSize.height - pipSize.height - safeArea.bottom,
                       );
-                    }
+                      _pipOffset = Offset(newDx, newDy);
+                    });
                   },
+                  child: SizedBox(
+                    key: _pipKey,
+                    width: 120,
+                    height: 160,
+                    child: VideoContainer(
+                      label: 'You',
+                      borderColor: AppTheme.successColor,
+                      child: webrtc.isVideoReady
+                          ? RTCVideoView(
+                              webrtc.localRenderer,
+                              mirror: true,
+                              objectFit: RTCVideoViewObjectFit
+                                  .RTCVideoViewObjectFitContain,
+                            )
+                          : const _NoCameraView(),
+                    ),
+                  ),
                 ),
               ),
 
-              const SizedBox(height: 16),
-
-              // Chat area
-              Expanded(
-                flex: 1,
-                child: _TextChatWidget(
-                  messages: messages,
-                  controller: _controller,
-                  focusNode: _focusNode,
+              // NEW: Keyboard-aware Animated Chat Box
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                bottom: isKeyboardOpen ? keyboardHeight : 100.0,
+                left: 16,
+                right: 16,
+                height: isKeyboardOpen
+                    ? expandedChatHeight
+                    : collapsedChatHeight,
+                child: FloatingChatWidget(
+                  messages: _messages,
+                  controller: _textController,
+                  focusNode: _textFocusNode,
                   onSend: _sendMessage,
+                  isExpanded: _isChatExpanded || isKeyboardOpen,
                 ),
               ),
 
-              const SizedBox(height: 16),
-
-              // Control buttons
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: AppTheme.surfaceDark,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppTheme.borderColor, width: 1),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    // Mute button
-                    _ControlButton(
-                      icon: isMuted ? Icons.mic_off : Icons.mic,
-                      label: isMuted ? 'Unmute' : 'Mute',
-                      onPressed: () {
-                        setState(() => isMuted = !isMuted);
-                      },
-                      color: isMuted
-                          ? AppTheme.errorColor
-                          : AppTheme.textSecondary,
-                    ),
-
-                    // Camera button
-                    _ControlButton(
-                      icon: isCameraOn ? Icons.videocam : Icons.videocam_off,
-                      label: isCameraOn ? 'Camera Off' : 'Camera On',
-                      onPressed: _toggleCamera,
-                      color: isCameraOn
-                          ? AppTheme.textSecondary
-                          : AppTheme.errorColor,
-                    ),
-
-                    // Refresh button
-                    _ControlButton(
-                      icon: Icons.refresh,
-                      label: 'Refresh',
-                      onPressed: () {
-                        _webrtc.refreshVideoRenderer();
-                        setState(() {});
-                      },
-                      color: AppTheme.textSecondary,
-                    ),
-
-                    // Next chat button
-                    _ControlButton(
-                      icon: Icons.skip_next,
-                      label: 'Next',
-                      onPressed: () {
-                        ref.read(websocketProvider.notifier).disconnect();
-                        _reconnectToNewChat();
-                      },
-                      color: AppTheme.primaryColor,
-                      isPrimary: true,
-                    ),
-
-                    // Report button
-                    _ControlButton(
-                      icon: Icons.flag,
-                      label: 'Report',
-                      onPressed: () async {
-                        if (_peerId != null) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('User reported.')),
-                          );
-                        }
-                      },
-                      color: AppTheme.textSecondary,
-                    ),
-                  ],
+              // --- Controls Area ---
+              Positioned(
+                bottom: 16,
+                left: 16,
+                right: 16,
+                child: ControlsWidget(
+                  isMuted: _isMuted,
+                  isCameraOn: _isCameraOn,
+                  onMuteToggle: _toggleMute,
+                  onCameraToggle: _toggleCamera,
+                  onNext: _findNewPartner,
                 ),
               ),
             ],
@@ -650,62 +513,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ),
     );
   }
-
-  @override
-  void dispose() {
-    _webrtc.close();
-    _controller.dispose();
-    _focusNode.dispose();
-    super.dispose();
-  }
 }
 
-/// Modern control button widget
-class _ControlButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onPressed;
-  final Color color;
-  final bool isPrimary;
-
-  const _ControlButton({
-    required this.icon,
-    required this.label,
-    required this.onPressed,
-    required this.color,
-    this.isPrimary = false,
-  });
+class _NoCameraView extends StatelessWidget {
+  const _NoCameraView();
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: isPrimary ? color : AppTheme.cardDark,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isPrimary ? Colors.transparent : AppTheme.borderColor,
-              width: 1,
+    return Container(
+      color: AppTheme.cardDark,
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.videocam_off, color: AppTheme.textMuted, size: 48),
+            SizedBox(height: 8),
+            Text(
+              'Camera not available',
+              style: TextStyle(color: AppTheme.textMuted),
             ),
-          ),
-          child: IconButton(
-            icon: Icon(icon, color: isPrimary ? Colors.white : color, size: 24),
-            onPressed: onPressed,
-            padding: const EdgeInsets.all(12),
-          ),
+          ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
-            color: AppTheme.textMuted,
-            fontSize: 10,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
+      ),
     );
   }
 }

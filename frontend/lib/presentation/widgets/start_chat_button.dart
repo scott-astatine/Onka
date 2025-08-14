@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import '../screens/chat_screen.dart';
 
 class StartChatButton extends StatefulWidget {
-  const StartChatButton({super.key});
+  final Future<void> Function() onPressed;
+
+  const StartChatButton({super.key, required this.onPressed});
 
   @override
   State<StartChatButton> createState() => _StartChatButtonState();
@@ -30,17 +31,15 @@ class _StartChatButtonState extends State<StartChatButton>
     super.dispose();
   }
 
-  void _startChat() async {
+  void _handleTap() async {
     setState(() => _searching = true);
-    // Simulate searching for a partner (replace with backend call)
-    await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
-    setState(() => _searching = false);
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ChatScreen(localUserId: 'me', remoteUserId: 'peer'),
-      ),
-    );
+    try {
+      await widget.onPressed();
+    } finally {
+      if (mounted) {
+        setState(() => _searching = false);
+      }
+    }
   }
 
   @override
@@ -52,7 +51,7 @@ class _StartChatButtonState extends State<StartChatButton>
           onTapDown: (_) => _controller.forward(),
           onTapUp: (_) => _controller.reverse(),
           onTapCancel: () => _controller.reverse(),
-          onTap: _startChat,
+          onTap: _searching ? null : _handleTap,
           child: ScaleTransition(
             scale: _controller.drive(Tween(begin: 1.0, end: 1.05)),
             child: Container(
@@ -80,19 +79,19 @@ class _StartChatButtonState extends State<StartChatButton>
           ),
         ),
         if (_searching)
-          Container(
-            color: Colors.black.withValues(alpha: 0.7),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: const [
-                SizedBox(height: 16),
-                CircularProgressIndicator(color: Colors.white),
-                SizedBox(height: 24),
-                Text(
-                  'Searching for a partner...',
-                  style: TextStyle(color: Colors.white, fontSize: 18),
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(32),
+              ),
+              child: const Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
                 ),
-              ],
+              ),
             ),
           ),
       ],

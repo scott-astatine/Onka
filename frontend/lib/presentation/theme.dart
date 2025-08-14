@@ -1,87 +1,108 @@
 import 'package:flutter/material.dart';
 
 class AppTheme {
-  // Color palette
-  static const Color primaryColor = Color(0xFF6366F1); // Indigo
-  static const Color primaryDark = Color(0xFF4F46E5);
-  static const Color secondaryColor = Color(0xFF10B981); // Emerald
-  static const Color accentColor = Color(0xFFF59E0B); // Amber
-  static const Color errorColor = Color(0xFFEF4444); // Red
-  static const Color successColor = Color(0xFF10B981); // Green
+  // --- GOTHIC CYBERPUNK PALETTE ---
+  // A dark, high-contrast theme with deep reds and stark whites.
+  
+  // Primary color is a visceral, blood-like red.
+  static const Color primaryColor = Color(0xFFE60023); // Crimson Red
+  static const Color secondaryColor = Color(0xFFF0F0F0); // Stark Off-White
+  
+  // Status colors that fit the aggressive theme.
+  static const Color errorColor = Color(0xFFE60023);   // Same as primary for consistency
+  static const Color successColor = Color(0xFF00A86B); // Deep Jade Green
 
-  // Background colors
-  static const Color backgroundDark = Color(0xFF0F172A); // Slate 900
-  static const Color surfaceDark = Color(0xFF1E293B); // Slate 800
-  static const Color cardDark = Color(0xFF334155); // Slate 700
+  // --- Dark Theme: "Cathedral of Code" ---
+  // Using a near-black palette for maximum contrast.
+  static const Color backgroundDark = Color(0xFF0A0A0A); // Near Black
+  static const Color surfaceDark = Color(0xFF141414);   // Very Dark Gray
+  static const Color cardDark = Color(0xFF1A1A1A);       // Dark Gray
 
-  // Text colors
-  static const Color textPrimary = Color(0xFFF8FAFC); // Slate 50
-  static const Color textSecondary = Color(0xFFCBD5E1); // Slate 300
-  static const Color textMuted = Color(0xFF64748B); // Slate 500
+  // --- Light Theme: "Sterile Lab" (High-contrast light mode) ---
+  static const Color backgroundLight = Color(0xFFFFFFFF); // Pure White
+  static const Color surfaceLight = Color(0xFFF5F5F5);    // Off-White
+  static const Color cardLight = Color(0xFFFFFFFF);
 
-  // Border colors
-  static const Color borderColor = Color(0xFF475569); // Slate 600
-  static const Color borderLight = Color(0xFF64748B); // Slate 500
+  // --- Universal Text & Border Colors ---
+  static const Color textPrimaryDark = Color(0xFFFFFFFF);   // Pure White for max contrast
+  static const Color textSecondaryDark = Color(0xFFA9A9A9); // Light Gray
+  static const Color textMutedDark = Color(0xFF686868);     // Medium Gray
 
-  // Light theme
+  static const Color textPrimaryLight = Color(0xFF0A0A0A); // Near Black on white
+  
+  static const Color borderDark = Color(0xFF333333);  // Dark Gray for subtle borders
+  static const Color borderLight = Color(0xFFE0E0E0); // Light Gray
+
+  // --- LEGACY COLORS (for compatibility with existing code) ---
+  // These are kept to prevent breaking changes in other files.
+  static const Color textPrimary = textPrimaryDark;
+  static const Color textSecondary = textSecondaryDark;
+  static const Color textMuted = textMutedDark;
+  static const Color borderColor = borderDark;
+
+
+  // --- THEME DEFINITIONS ---
+
+  /// The light theme, a stark, high-contrast "sterile" look.
   static ThemeData get lightTheme {
     return ThemeData(
       useMaterial3: true,
       brightness: Brightness.light,
+      scaffoldBackgroundColor: backgroundLight,
       colorScheme: const ColorScheme.light(
         primary: primaryColor,
         secondary: secondaryColor,
-        surface: Colors.white,
+        surface: surfaceLight,
         error: errorColor,
+        onSurface: textPrimaryLight,
       ),
       appBarTheme: const AppBarTheme(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
+        backgroundColor: surfaceLight,
+        foregroundColor: textPrimaryLight,
         elevation: 0,
         centerTitle: true,
       ),
-      cardTheme: const CardThemeData(
-        color: Colors.white,
-        elevation: 2,
+      cardTheme: CardThemeData(
+        color: cardLight,
+        elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(16)),
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
+          side: BorderSide(color: borderLight, width: 1),
         ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: primaryColor,
-          foregroundColor: Colors.white,
+          foregroundColor: textPrimaryDark, // White text on red button
           elevation: 0,
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(8),
           ),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: Colors.grey[100],
+        fillColor: surfaceLight,
+        hintStyle: TextStyle(color: textPrimaryLight.withOpacity(0.6)),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderLight),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderLight),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(8),
           borderSide: const BorderSide(color: primaryColor, width: 2),
         ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 12,
-        ),
       ),
+      iconTheme: const IconThemeData(color: textPrimaryLight, size: 24),
     );
   }
 
-  // Dark theme
+  /// The dark theme, for a high-contrast, aggressive gothic-tech aesthetic.
   static ThemeData get darkTheme {
     return ThemeData(
       useMaterial3: true,
@@ -92,59 +113,58 @@ class AppTheme {
         secondary: secondaryColor,
         surface: surfaceDark,
         error: errorColor,
-        onSurface: textPrimary,
+        onSurface: textPrimaryDark,
       ),
       appBarTheme: const AppBarTheme(
         backgroundColor: surfaceDark,
-        foregroundColor: textPrimary,
+        foregroundColor: textPrimaryDark,
         elevation: 0,
         centerTitle: true,
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: CardThemeData(
         color: cardDark,
-        elevation: 4,
+        elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(16)),
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
+          side: BorderSide(color: borderDark, width: 1),
         ),
       ),
-      elevatedButtonTheme: ElevatedButtonThemeData(
+       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: primaryColor,
-          foregroundColor: Colors.white,
-          elevation: 0,
+          foregroundColor: textPrimaryDark, // White text on red button
+          elevation: 2,
+          shadowColor: primaryColor.withOpacity(0.4),
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(8),
           ),
         ),
       ),
       floatingActionButtonTheme: const FloatingActionButtonThemeData(
         backgroundColor: primaryColor,
-        foregroundColor: Colors.white,
+        foregroundColor: textPrimaryDark,
         elevation: 4,
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: surfaceDark,
+        hintStyle: const TextStyle(color: textMutedDark),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: borderColor),
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderDark),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: borderColor),
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: borderDark),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(8),
           borderSide: const BorderSide(color: primaryColor, width: 2),
         ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 12,
-        ),
-        hintStyle: const TextStyle(color: textMuted),
       ),
-      iconTheme: const IconThemeData(color: textSecondary, size: 24),
+      iconTheme: const IconThemeData(color: textSecondaryDark, size: 24),
     );
   }
 }
+

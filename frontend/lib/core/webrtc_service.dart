@@ -1,172 +1,206 @@
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:flutter/widgets.dart';
-import 'package:flutter/foundation.dart';
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+/// A service class to manage WebRTC connections, media streams, and renderers.
+/// This encapsulates the core logic for a peer-to-peer video call.
 class WebRTCService {
+  // Private variables to hold the core WebRTC objects.
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
-  RTCVideoRenderer localRenderer = RTCVideoRenderer();
-  RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
 
-  // Getter for local stream
+  // Public renderers that the UI will use to display video.
+  final RTCVideoRenderer localRenderer = RTCVideoRenderer();
+  final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
+
+  // Flag to track if the renderers have been initialized.
+  bool _isInitialized = false;
+
+  // --- Public Getters for UI State ---
+
+  /// Provides access to the local media stream.
   MediaStream? get localStream => _localStream;
 
-  // Check if video is ready
+  /// A simple check to see if the local video stream is available and running.
   bool get isVideoReady =>
       _localStream != null && _localStream!.getVideoTracks().isNotEmpty;
 
-  // Check if the service is properly initialized
-  bool _initialized = false;
-  bool get isInitialized => _initialized;
+  /// Checks if the service's renderers are initialized and ready to be used.
+  bool get isInitialized => _isInitialized;
 
-  // Force refresh the video renderer
-  void refreshVideoRenderer() {
-    if (_localStream != null) {
-      // Clear the renderer first
-      localRenderer.srcObject = null;
-
-      // Re-set the stream on the main thread after a short delay
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        Future.delayed(const Duration(milliseconds: 200), () {
-          if (_localStream != null) {
-            localRenderer.srcObject = _localStream;
-          }
-        });
-      });
-    }
-  }
-
+  /// Initializes the video renderers. This must be called before they can be used.
   Future<void> initRenderers() async {
+    // Avoid re-initializing if already done.
+    if (_isInitialized) return;
+
     try {
       await localRenderer.initialize();
       await remoteRenderer.initialize();
-      _initialized = true;
-      debugPrint('Video renderers initialized successfully');
+      _isInitialized = true;
+      debugPrint('✅ Video renderers initialized successfully');
     } catch (e) {
-      debugPrint('Error initializing renderers: $e');
-      _initialized = false;
+      debugPrint('❌ Error initializing renderers: $e');
+      _isInitialized = false;
+      // Re-throw the error so the calling widget can handle it (e.g., show an error message).
       rethrow;
     }
   }
 
+  /// Requests camera and microphone permissions and captures the local media stream.
   Future<void> getUserMedia() async {
-    try {
-      // Request permissions first
-      await _requestPermissions();
-
-      // First try with video constraints
-      _localStream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': {
-          'facingMode': 'user',
-          'width': {'ideal': 640, 'min': 320},
-          'height': {'ideal': 480, 'min': 240},
-          'frameRate': {'ideal': 30, 'min': 15},
+    // Define standard media constraints for a video call.
+    final Map<String, dynamic> mediaConstraints = {
+      'audio': true,
+      'video': {
+        'facingMode': 'user',
+        'mandatory': {
+          'minWidth': '640',
+          'minHeight': '480',
+          'minFrameRate': '30',
         },
-      });
+      },
+    };
 
-      // Set the stream to renderer on the main thread
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_localStream != null) {
-          localRenderer.srcObject = _localStream;
-        }
-      });
-
-      debugPrint(
-        'Local stream obtained: ${_localStream?.getVideoTracks().length} video tracks',
+    try {
+      // Get the media stream from the user's device.
+      _localStream = await navigator.mediaDevices.getUserMedia(
+        mediaConstraints,
       );
+      debugPrint('✅ Local stream obtained successfully.');
+
+      // Attach the local stream to the local video renderer to display it.
+      localRenderer.srcObject = _localStream;
     } catch (e) {
-      debugPrint('Error getting user media: $e');
-      // Try with audio only if video fails
+      debugPrint('❌ Error getting user media: $e');
+      // If getting video fails, try a fallback to an audio-only stream.
       try {
         _localStream = await navigator.mediaDevices.getUserMedia({
           'audio': true,
           'video': false,
         });
-        debugPrint('Fallback to audio-only stream');
+        debugPrint('✅ Fallback to audio-only stream successful.');
+        localRenderer.srcObject = _localStream;
       } catch (audioError) {
-        debugPrint('Error getting audio-only stream: $audioError');
+        debugPrint('❌ Error getting audio-only stream: $audioError');
+        // If even audio fails, re-throw the error.
         rethrow;
       }
     }
   }
 
-  /// Request camera and microphone permissions
-  Future<void> _requestPermissions() async {
-    // Skip permission requests on desktop/web platforms
-    if (kIsWeb || Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
-      debugPrint('Skipping permission request on desktop/web platform');
-      return;
-    }
+  /// Creates and configures the RTCPeerConnection object.
+  Future<void> initPeerConnection({
+    required Map<String, dynamic> configuration,
+    required Function(RTCIceCandidate candidate) onIceCandidate,
+    required Function(MediaStream stream) onTrack,
+  }) async {
+    // Ensure any previous connection is properly closed before starting a new one.
+    await _resetPeerConnection();
 
-    // On mobile platforms, permissions will be requested by the system
-    // when getUserMedia is called, so we don't need to handle them explicitly here
-    debugPrint('Permission request skipped - will be handled by system');
-  }
+    _peerConnection = await createPeerConnection(configuration);
 
-  Future<void> initPeerConnection(Map<String, dynamic> config) async {
-    _peerConnection = await createPeerConnection(config);
-    _peerConnection?.onTrack = (event) {
-      if (event.track.kind == 'video') {
-        _remoteStream = event.streams[0];
-        remoteRenderer.srcObject = _remoteStream;
+    // Listen for ICE candidates generated by the local peer.
+    // These candidates must be sent to the remote peer via the signaling server.
+    _peerConnection!.onIceCandidate = (candidate) {
+      if (candidate != null) {
+        onIceCandidate(candidate);
       }
     };
-    _localStream?.getTracks().forEach((track) {
-      _peerConnection?.addTrack(track, _localStream!);
-    });
+
+    // Listen for media tracks from the remote peer.
+    _peerConnection!.onTrack = (event) {
+      if (event.track.kind == 'video' && event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+        // Attach the remote stream to the remote video renderer.
+        remoteRenderer.srcObject = _remoteStream;
+        // Notify the UI that it needs to update.
+        onTrack(event.streams[0]);
+      }
+    };
+
+    // Add all tracks from our local stream to the peer connection so they can be sent.
+    if (_localStream != null) {
+      for (var track in _localStream!.getTracks()) {
+        _peerConnection!.addTrack(track, _localStream!);
+      }
+      debugPrint('✅ Local tracks added to peer connection.');
+    }
   }
 
+  /// Creates an SDP offer to initiate a connection.
   Future<RTCSessionDescription> createOffer() async {
+    if (_peerConnection == null)
+      throw Exception('PeerConnection not initialized');
     return await _peerConnection!.createOffer();
   }
 
-  Future<void> setLocalDescription(RTCSessionDescription desc) async {
-    await _peerConnection!.setLocalDescription(desc);
-  }
-
-  Future<void> setRemoteDescription(RTCSessionDescription desc) async {
-    await _peerConnection!.setRemoteDescription(desc);
-  }
-
+  /// Creates an SDP answer to respond to an offer.
   Future<RTCSessionDescription> createAnswer() async {
+    if (_peerConnection == null)
+      throw Exception('PeerConnection not initialized');
     return await _peerConnection!.createAnswer();
   }
 
+  /// Sets the local SDP description.
+  Future<void> setLocalDescription(RTCSessionDescription description) async {
+    if (_peerConnection == null)
+      throw Exception('PeerConnection not initialized');
+    await _peerConnection!.setLocalDescription(description);
+  }
+
+  /// Sets the remote SDP description received from the other peer.
+  Future<void> setRemoteDescription(RTCSessionDescription description) async {
+    if (_peerConnection == null)
+      throw Exception('PeerConnection not initialized');
+    await _peerConnection!.setRemoteDescription(description);
+  }
+
+  /// Adds a new ICE candidate received from the remote peer.
   Future<void> addIceCandidate(RTCIceCandidate candidate) async {
+    if (_peerConnection == null)
+      throw Exception('PeerConnection not initialized');
     await _peerConnection!.addCandidate(candidate);
   }
 
-  void close() {
+  /// Safely closes and nullifies the current peer connection.
+  Future<void> _resetPeerConnection() async {
+    if (_peerConnection != null) {
+      await _peerConnection!.close();
+      _peerConnection = null;
+      debugPrint('Peer connection reset.');
+    }
+  }
+
+  /// Cleans up all resources used by the service.
+  /// This should be called when the widget using this service is disposed.
+  Future<void> close() async {
     try {
-      // Stop all tracks in the local stream
-      _localStream?.getTracks().forEach((track) {
-        track.stop();
+      // 1. Stop all media tracks to release camera/mic.
+      _localStream?.getTracks().forEach((track) async {
+        await track.stop();
       });
+      _localStream?.dispose();
+      _localStream = null;
+      debugPrint('Local stream closed.');
 
-      // Close peer connection
-      _peerConnection?.close();
+      // 2. Close the peer connection.
+      await _resetPeerConnection();
 
-      // Clear renderers
+      // 3. Clear the video renderers' sources.
       localRenderer.srcObject = null;
       remoteRenderer.srcObject = null;
+      debugPrint('Renderers cleared.');
 
-      // Dispose renderers
-      localRenderer.dispose();
-      remoteRenderer.dispose();
+      // 4. Dispose of the renderers to free up native resources.
+      if (localRenderer.textureId != null) await localRenderer.dispose();
+      if (remoteRenderer.textureId != null) await remoteRenderer.dispose();
+      _isInitialized = false;
+      debugPrint('Renderers disposed.');
 
-      // Clear streams
-      _localStream = null;
-      _remoteStream = null;
-      _peerConnection = null;
-      _initialized = false;
-
-      debugPrint('WebRTC service closed successfully');
+      debugPrint('✅ WebRTC service closed successfully');
     } catch (e) {
-      debugPrint('Error closing WebRTC service: $e');
+      debugPrint('❌ Error closing WebRTC service: $e');
     }
   }
 }

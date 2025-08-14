@@ -30,7 +30,7 @@ class ConnectionManager:
                 peer_ws = self.active_connections.get(peer_id)
                 if peer_ws:
                     self.logger.info(f"Notifying peer {peer_id} of disconnection.")
-                    await peer_ws.send_json({"type": "peer_left"})
+                    await peer_ws.send_json({"type": "peer_disconnected"})
                     self.waiting_users.add(peer_id)
                     await self.pair_users()
 
@@ -54,7 +54,9 @@ class ConnectionManager:
             async with self.lock:
                 peer_id = self.paired_users.get(sender_id)
                 if peer_id:
-                    self.logger.info(f"User {sender_id} requested 'next'. Breaking pair with {peer_id}.")
+                    self.logger.info(
+                        f"User {sender_id} requested 'next'. Breaking pair with {peer_id}."
+                    )
                     # Notify both users the chat has ended
                     for user_id in [sender_id, peer_id]:
                         ws = self.active_connections.get(user_id)
@@ -73,3 +75,7 @@ class ConnectionManager:
             peer_id = self.paired_users.get(sender_id)
             if peer_id and (peer_ws := self.active_connections.get(peer_id)):
                 await peer_ws.send_json(data)
+
+    def get_stats(self):
+        """Returns a dictionary with the current number of online users."""
+        return {"users_online": len(self.active_connections)}

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, status
-from app.db.reports import log_report, get_stats
+from app.db.reports import log_report
 from pydantic import BaseModel
 from app.core.security import get_current_user_id
 
@@ -9,12 +9,6 @@ router = APIRouter()
 class ReportRequest(BaseModel):
     # The reporter_id will be injected from the authenticated user dependency.
     reported_id: str
-
-
-@router.get("/stats")
-async def stats():
-    return await get_stats()
-
 
 @router.post("/report", status_code=status.HTTP_201_CREATED)
 async def report(
