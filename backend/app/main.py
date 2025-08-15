@@ -1,9 +1,11 @@
+import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, APIRouter
 import logging
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.connection_manager import ConnectionManager
 from app.api.routes import router as api_router
 from app.core.auth import create_access_token
+
 
 app = FastAPI(title="onka Backend")
 
@@ -28,6 +30,7 @@ app.add_middleware(
 @app.get("/api/stats")
 async def stats():
     """Returns the current number of online users."""
+    # print(os.getenv("DATABASE_URL"), os.getenv("PORT"))
     return manager.get_stats()
 
 

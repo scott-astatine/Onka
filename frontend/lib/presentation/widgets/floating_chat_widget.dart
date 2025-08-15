@@ -1,6 +1,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:onka/presentation/theme.dart';
+import 'package:onka/presentation/widgets/chat_input.dart';
 import 'package:onka/presentation/widgets/control_bar_widget.dart';
 
 class FloatingChatWidget extends StatelessWidget {

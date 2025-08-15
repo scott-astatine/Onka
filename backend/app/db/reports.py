@@ -1,12 +1,11 @@
 import asyncpg
 import os
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:postgres@db:5432/onka"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 async def get_db():
+    print(f"Connecting to {DATABASE_URL}")
     return await asyncpg.connect(DATABASE_URL)
 
 

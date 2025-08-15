@@ -42,7 +42,7 @@ class WebRTCService {
     } catch (e) {
       debugPrint('❌ Error initializing renderers: $e');
       _isInitialized = false;
-      // Re-throw the error so the calling widget can handle it (e.g., show an error message).
+      // Re-throw the error so the calling widget can handle it
       rethrow;
     }
   }

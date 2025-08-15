@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../core/config.dart'; // Assuming you have a config file for the URL
 
@@ -57,9 +58,9 @@ class WebSocketNotifier extends StateNotifier<WebSocketState> {
       _channel = WebSocketChannel.connect(Uri.parse(url));
       _channel!.stream.listen(_onMessage, onError: _onError, onDone: _onDone);
       state = state.copyWith(connected: true, error: null);
-      print("✅ WebSocket connected to: $url");
+      debugPrint("✅ WebSocket connected to: $url");
     } catch (e) {
-      print("❌ WebSocket connection error: $e");
+      debugPrint("❌ WebSocket connection error: $e");
       state = state.copyWith(error: e.toString(), connected: false);
     }
   }
@@ -69,14 +70,14 @@ class WebSocketNotifier extends StateNotifier<WebSocketState> {
     _channel?.sink.close();
     _channel = null;
     state = WebSocketState(); // Reset to initial state
-    print("🔌 WebSocket disconnected.");
+    debugPrint("🔌 WebSocket disconnected.");
   }
 
   /// Handles incoming messages from the WebSocket server.
   void _onMessage(dynamic message) {
     try {
       final data = jsonDecode(message) as Map<String, dynamic>;
-      print("⬇️ Received WS message: $data");
+      debugPrint("⬇️ Received WS message: $data");
 
       // **FIX 2: Pass ALL messages to the state via the 'data' property.**
       // This ensures the UI is notified of every message, not just peer_found.
@@ -93,19 +94,19 @@ class WebSocketNotifier extends StateNotifier<WebSocketState> {
           state = state.copyWith(data: data);
       }
     } catch (e) {
-      print("❌ Error decoding message: $e");
+      debugPrint("❌ Error decoding message: $e");
     }
   }
 
   /// Handles errors on the WebSocket stream.
   void _onError(error) {
-    print("❌ WebSocket error: $error");
+    debugPrint("❌ WebSocket error: $error");
     state = state.copyWith(error: error.toString(), connected: false);
   }
 
   /// Handles the closing of the WebSocket stream.
   void _onDone() {
-    print("WebSocket connection done.");
+    debugPrint("WebSocket connection done.");
     state = state.copyWith(connected: false, clearPeerId: true);
   }
 
@@ -113,11 +114,10 @@ class WebSocketNotifier extends StateNotifier<WebSocketState> {
   void send(Map<String, dynamic> data) {
     if (_channel != null && state.connected) {
       final message = jsonEncode(data);
-      print("⬆️ Sending WS message: $message");
+      debugPrint("⬆️ Sending WS message: $message");
       _channel!.sink.add(message);
     } else {
-      print("⚠️ Tried to send message, but WebSocket is not connected.");
+      debugPrint("⚠️ Tried to send message, but WebSocket is not connected.");
     }
   }
 }
-
