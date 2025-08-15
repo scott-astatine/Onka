@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-gunicorn
-asyncpg
-pydantic
-python-jose[cryptography]
